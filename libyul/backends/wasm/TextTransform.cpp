@@ -57,7 +57,7 @@ string TextTransform::run(wasm::Module const& _module)
 	ret += "    (export \"main\" (func $main))\n";
 
 	for (auto const& g: _module.globals)
-		ret += "    (global $" + g.variableName + " (mut i64) (i64.const 0))\n";
+		ret += "    (global $" + g.variableName + " (mut " + g.type.str() + ") (" + g.type.str() + ".const 0))\n";
 	ret += "\n";
 	for (auto const& f: _module.functions)
 		ret += transform(f) + "\n";
@@ -168,12 +168,12 @@ string TextTransform::indented(string const& _in)
 string TextTransform::transform(wasm::FunctionDefinition const& _function)
 {
 	string ret = "(func $" + _function.name + "\n";
-	for (auto const& param: _function.parameterNames)
-		ret += "    (param $" + param + " i64)\n";
+	for (auto const& param: _function.parameters)
+		ret += "    (param $" + param.name + " " + param.type.str() + ")\n";
 	if (_function.returns)
-		ret += "    (result i64)\n";
+		ret += "    (result " + _function.locals.at(0).type.str() + ")\n";
 	for (auto const& local: _function.locals)
-		ret += "    (local $" + local.variableName + " i64)\n";
+		ret += "    (local $" + local.variableName + " " + local.type.str() + ")\n";
 	ret += indented(joinTransformed(_function.body, '\n'));
 	if (ret.back() != '\n')
 		ret += '\n';

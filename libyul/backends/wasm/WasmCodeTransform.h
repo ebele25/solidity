@@ -24,6 +24,9 @@
 #include <libyul/AsmDataForward.h>
 #include <libyul/Dialect.h>
 #include <libyul/optimiser/NameDispenser.h>
+#include <libyul/optimiser/TypeInfo.h>
+
+#include <libsolutil/Common.h>
 
 #include <stack>
 #include <map>
@@ -56,10 +59,12 @@ public:
 private:
 	WasmCodeTransform(
 		Dialect const& _dialect,
-		Block const& _ast
+		Block const& _ast,
+		TypeInfo& _typeInfo
 	):
 		m_dialect(_dialect),
-		m_nameDispenser(_dialect, _ast)
+		m_nameDispenser(_dialect, _ast),
+		m_typeInfo(_typeInfo)
 	{}
 
 	std::unique_ptr<wasm::Expression> visit(yul::Expression const& _expression);
@@ -80,17 +85,21 @@ private:
 	wasm::FunctionDefinition translateFunction(yul::FunctionDefinition const& _funDef);
 
 	std::string newLabel();
-	/// Makes sure that there are at least @a _amount global variables.
-	void allocateGlobals(size_t _amount);
+	/// Selects a subset of global variables matching specified sequence of variable types.
+	/// Defines more global variables of a given type if there's not enough.
+	std::vector<size_t> allocateGlobals(std::vector<wasm::Type> const& _requestedTypes);
+
+	wasm::Literal makeLiteral(wasm::Type _type, u256 _value);
 
 	Dialect const& m_dialect;
 	NameDispenser m_nameDispenser;
 
 	std::vector<wasm::VariableDeclaration> m_localVariables;
 	std::vector<wasm::GlobalVariableDeclaration> m_globalVariables;
-	std::map<YulString, wasm::FunctionImport> m_functionsToImport;
+	std::map<wasm::Type, wasm::FunctionImport> m_functionsToImport;
 	std::string m_functionBodyLabel;
 	std::stack<std::pair<std::string, std::string>> m_breakContinueLabelNames;
+	TypeInfo& m_typeInfo;
 };
 
 }

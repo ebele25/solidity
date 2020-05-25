@@ -34,6 +34,11 @@ using namespace solidity::util;
 namespace
 {
 
+uint8_t constexpr ImmutableFlag = 0;
+uint8_t constexpr MutableFlag = 1;
+uint8_t constexpr MaximumFieldOmittedFlag = 0;
+uint8_t constexpr MaximumFieldPresentFlag = 1;
+
 bytes toBytes(uint8_t _b)
 {
 	return bytes(1, _b);
@@ -67,6 +72,16 @@ enum class ValueType: uint8_t
 bytes toBytes(ValueType _vt)
 {
 	return toBytes(uint8_t(_vt));
+}
+
+ValueType toValueType(std::string _typeName)
+{
+	if (_typeName == "i32")
+		return ValueType::I32;
+	else if (_typeName == "i64")
+		return ValueType::I64;
+	else
+		yulAssert(false, "Invalid wasm variable type");
 }
 
 enum class Export: uint8_t
@@ -116,6 +131,16 @@ enum class Opcode: uint8_t
 bytes toBytes(Opcode _o)
 {
 	return toBytes(uint8_t(_o));
+}
+
+Opcode constOpcodeFor(ValueType _type)
+{
+	if (_type == ValueType::I32)
+		return Opcode::I32Const;
+	else if (_type == ValueType::I64)
+		return Opcode::I64Const;
+	else
+		yulAssert(false, "Values of this type cannot be used with const opcode");
 }
 
 static std::map<string, uint8_t> const builtins = {
@@ -236,6 +261,33 @@ bytes makeSection(Section _section, bytes _data)
 	return toBytes(_section) + prefixSize(std::move(_data));
 }
 
+/// This is a kind of run-length-encoding of local types.
+vector<pair<size_t, ValueType>> groupLocalVariables(vector<VariableDeclaration> _localVariables)
+{
+	vector<pair<size_t, ValueType>> localEntries;
+
+	size_t entrySize = 0;
+	ValueType entryType = ValueType::I32; // Any type would work here
+	for (VariableDeclaration const& localVariable: _localVariables)
+	{
+		ValueType variableType = toValueType(localVariable.type.str());
+
+		if (variableType != entryType)
+		{
+			localEntries.emplace_back(entrySize, entryType);
+
+			entryType = variableType;
+			entrySize = 0;
+		}
+
+		++entrySize;
+	}
+	if (entrySize > 0)
+		localEntries.emplace_back(entrySize, entryType);
+
+	return localEntries;
+}
+
 }
 
 bytes BinaryTransform::run(Module const& _module)
@@ -258,7 +310,7 @@ bytes BinaryTransform::run(Module const& _module)
 	ret += bt.importSection(_module.imports);
 	ret += bt.functionSection(_module.functions);
 	ret += bt.memorySection();
-	ret += bt.globalSection();
+	ret += bt.globalSection(_module.globals);
 	ret += bt.exportSection();
 	for (auto const& sub: _module.subModules)
 	{
@@ -421,16 +473,19 @@ bytes BinaryTransform::operator()(FunctionDefinition const& _function)
 {
 	bytes ret;
 
-	// This is a kind of run-length-encoding of local types. Has to be adapted once
-	// we have locals of different types.
-	ret += lebEncode(1); // number of locals groups
-	ret += lebEncode(_function.locals.size());
-	ret += toBytes(ValueType::I64);
+	vector<pair<size_t, ValueType>> localEntries = groupLocalVariables(_function.locals);
+
+	ret += lebEncode(localEntries.size()); // number of locals groups
+	for (pair<size_t, ValueType> const& entry: localEntries)
+	{
+		ret += lebEncode(entry.first);
+		ret += toBytes(entry.second);
+	}
 
 	m_locals.clear();
 	size_t varIdx = 0;
-	for (size_t i = 0; i < _function.parameterNames.size(); ++i)
-		m_locals[_function.parameterNames[i]] = varIdx++;
+	for (size_t i = 0; i < _function.parameters.size(); ++i)
+		m_locals[_function.parameters[i].name] = varIdx++;
 	for (size_t i = 0; i < _function.locals.size(); ++i)
 		m_locals[_function.locals[i].variableName] = varIdx++;
 
@@ -454,22 +509,15 @@ BinaryTransform::Type BinaryTransform::typeOf(FunctionImport const& _import)
 
 BinaryTransform::Type BinaryTransform::typeOf(FunctionDefinition const& _funDef)
 {
-
 	return {
-		encodeTypes(vector<string>(_funDef.parameterNames.size(), "i64")),
-		encodeTypes(vector<string>(_funDef.returns ? 1 : 0, "i64"))
+		encodeTypes(_funDef.parameters),
+		encodeTypes(_funDef.returns ? vector<string>(1, _funDef.locals.at(0).type.str()) : vector<string>{})
 	};
 }
 
 uint8_t BinaryTransform::encodeType(string const& _typeName)
 {
-	if (_typeName == "i32")
-		return uint8_t(ValueType::I32);
-	else if (_typeName == "i64")
-		return uint8_t(ValueType::I64);
-	else
-		yulAssert(false, "");
-	return 0;
+	return uint8_t(toValueType(_typeName));
 }
 
 vector<uint8_t> BinaryTransform::encodeTypes(vector<string> const& _typeNames)
@@ -477,6 +525,14 @@ vector<uint8_t> BinaryTransform::encodeTypes(vector<string> const& _typeNames)
 	vector<uint8_t> result;
 	for (auto const& t: _typeNames)
 		result.emplace_back(encodeType(t));
+	return result;
+}
+
+vector<uint8_t> BinaryTransform::encodeTypes(wasm::TypedNameList const& _typedNameList)
+{
+	vector<uint8_t> result;
+	for (TypedName const& typedName: _typedNameList)
+		result.emplace_back(encodeType(typedName.type.str()));
 	return result;
 }
 
@@ -535,21 +591,26 @@ bytes BinaryTransform::functionSection(vector<FunctionDefinition> const& _functi
 bytes BinaryTransform::memorySection()
 {
 	bytes result = lebEncode(1);
-	result.push_back(0); // flags
-	result.push_back(1); // initial
+	result.push_back(MaximumFieldOmittedFlag);
+	result.push_back(1); // initial length
 	return makeSection(Section::MEMORY, std::move(result));
 }
 
-bytes BinaryTransform::globalSection()
+bytes BinaryTransform::globalSection(vector<GlobalVariableDeclaration> const& _globals)
 {
+	yulAssert(m_globals.size() == _globals.size(), "");
+
 	bytes result = lebEncode(m_globals.size());
-	for (size_t i = 0; i < m_globals.size(); ++i)
+	for (wasm::GlobalVariableDeclaration const& global: _globals)
+	{
+		ValueType globalType = toValueType(global.type.str());
 		result +=
-			// mutable i64
-			bytes{uint8_t(ValueType::I64), 1} +
-			toBytes(Opcode::I64Const) +
+			toBytes(globalType) +
+			lebEncode(MutableFlag) +
+			toBytes(constOpcodeFor(globalType)) +
 			lebEncodeSigned(0) +
 			toBytes(Opcode::End);
+	}
 
 	return makeSection(Section::GLOBAL, std::move(result));
 }

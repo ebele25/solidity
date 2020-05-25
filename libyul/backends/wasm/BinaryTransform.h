@@ -61,6 +61,7 @@ private:
 
 	static uint8_t encodeType(std::string const& _typeName);
 	static std::vector<uint8_t> encodeTypes(std::vector<std::string> const& _typeNames);
+	static std::vector<uint8_t> encodeTypes(wasm::TypedNameList const& _typedNameList);
 	bytes typeSection(
 		std::vector<wasm::FunctionImport> const& _imports,
 		std::vector<wasm::FunctionDefinition> const& _functions
@@ -69,7 +70,7 @@ private:
 	bytes importSection(std::vector<wasm::FunctionImport> const& _imports);
 	bytes functionSection(std::vector<wasm::FunctionDefinition> const& _functions);
 	bytes memorySection();
-	bytes globalSection();
+	bytes globalSection(std::vector<GlobalVariableDeclaration> const& _globals);
 	bytes exportSection();
 	bytes customSection(std::string const& _name, bytes _data);
 	bytes codeSection(std::vector<wasm::FunctionDefinition> const& _functions);
